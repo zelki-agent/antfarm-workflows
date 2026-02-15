@@ -579,7 +579,7 @@ To propose workflow improvements:
 
 ## License
 
-Proprietary - authorized use only.
+MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Support
 
