@@ -99,8 +99,15 @@ steps:
       TASK:
       {{task}}
 
+      ⚠️ CRITICAL: The following parameters MUST be provided explicitly in the task string:
+      - REPO: <absolute-path-to-repo> (e.g., /root/.openclaw/workspace/squad-pick)
+      - BRANCH: <existing-pr-branch> (e.g., feature/catalog-models-22)
+      
+      If not found in task string, FAIL immediately with error message.
+
       Instructions:
-      1. Explore the codebase — understand the stack, framework, dependencies
+      1. Parse REPO and BRANCH from the task string above (must be explicit)
+      2. Explore the codebase at that REPO path — understand the stack, framework, dependencies
       2. Run `npm audit` (or equivalent) if a package manager is present
       3. Scan for hardcoded secrets: API keys, passwords, tokens, private keys in source
       4. Check for .env files committed to the repo
@@ -121,10 +128,12 @@ steps:
 
       Reply with:
       STATUS: done
-      REPO: /path/to/repo
-      BRANCH: security-audit-YYYY-MM-DD
+      REPO: <the exact REPO path from task string>
+      BRANCH: <the exact BRANCH from task string>
       VULNERABILITY_COUNT: <number>
       FINDINGS: <detailed list of each vulnerability>
+      
+      ⚠️ DO NOT GUESS: Use the exact REPO and BRANCH provided in the task string above.
     expects: "STATUS: done"
     max_retries: 2
     on_fail:
