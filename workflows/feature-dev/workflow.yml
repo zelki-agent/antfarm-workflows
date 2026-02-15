@@ -145,18 +145,42 @@ steps:
       GITHUB_ISSUES_JSON: {{github_issues_json}}
 
       Instructions:
+      0. Initialize dependency graph if it doesn't exist:
+         ```bash
+         # Check if dependency-graph.json exists on main
+         if ! git show origin/main:dependency-graph.json > /dev/null 2>&1; then
+           # Create initial empty graph on main
+           cat > dependency-graph.json <<'GRAPH_EOF'
+         {
+           "version": 2,
+           "stories": [],
+           "last_updated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+           "metadata": {
+             "repo": "$(git remote get-url origin | sed 's/.*[:/]\(.*\)\.git$/\1/')",
+             "initialized": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+             "description": "Antfarm workflow dependency graph"
+           }
+         }
+         GRAPH_EOF
+           git checkout main
+           git add dependency-graph.json
+           git commit -m "chore: Initialize Antfarm dependency graph"
+           git push origin main
+         fi
+         ```
       1. Read the user stories from STORIES_JSON
       2. Analyze dependencies between stories
-      3. Create dependency-graph.json with:
-         - Story metadata (id, title, issue_number)
+      3. Fetch latest dependency-graph.json from origin/main
+      4. Merge new stories into the existing graph (preserve completed/in_progress stories)
+      5. Update the graph with:
+         - New story metadata (id, title, issue_number)
          - Dependencies (which stories depend on which)
          - Parallel groups (stories that can run simultaneously)
-         - Initial status (ready_to_pick, blocked, etc.)
-      4. Save to repo root: dependency-graph.json
-      5. Commit and push
-      6. Create scripts/query-next-task.sh if it doesn't exist
-      7. Create scripts/update-dependency-graph.sh if it doesn't exist
-      8. Post summary comment on main issue
+         - Initial status for new stories (ready_to_pick, blocked, etc.)
+      6. Commit and push updated dependency-graph.json to main
+      7. Create scripts/query-next-task.sh if it doesn't exist
+      8. Create scripts/update-dependency-graph.sh if it doesn't exist
+      9. Post summary comment on main issue
 
       Reply with:
       STATUS: done
