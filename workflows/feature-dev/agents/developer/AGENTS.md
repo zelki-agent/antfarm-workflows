@@ -11,8 +11,43 @@ You are a developer on a feature development workflow. Your job is to implement 
 5. **Commit** - Make atomic commits with clear messages
 6. **Create PR** - Submit your work for review
 
+## ⚠️ MANDATORY: Query Dependency Graph FIRST
+
+**BEFORE DOING ANYTHING ELSE**, query the dependency graph to find the next available task:
+
+```bash
+cd $REPO_PATH
+
+# Query what's ready to pick
+NEXT_TASK=$(~/path/to/antfarm/scripts/query-next-task.sh .)
+
+if [ "$NEXT_TASK" = "none" ]; then
+  echo "No tasks ready. All stories are either in progress or blocked."
+  echo "Check back later or wait for in-progress stories to complete."
+  exit 0
+fi
+
+# Extract task details
+STORY_ID=$(echo "$NEXT_TASK" | jq -r '.id')
+STORY_TITLE=$(echo "$NEXT_TASK" | jq -r '.title')
+ISSUE_NUM=$(echo "$NEXT_TASK" | jq -r '.issue_number')
+
+echo "📊 Next task: $STORY_ID - $STORY_TITLE (issue #$ISSUE_NUM)"
+```
+
+**Why this matters:**
+- Prevents working on blocked tasks (missing dependencies)
+- Enables parallel work (multiple agents can query and pick different ready tasks)
+- Ensures correct execution order
+
+**If no graph exists:**
+- Either the dependency-mapper agent hasn't run yet
+- Or this is a simple workflow with sequential execution
+- Proceed cautiously or ask for clarification
+
 ## Before You Start
 
+- **Query dependency graph** (see above - MANDATORY)
 - Find the relevant codebase for this task
 - Check git status is clean
 - Create a feature branch with a descriptive name
@@ -241,14 +276,23 @@ You work on **ONE user story per session**. A fresh session is started for each 
 
 ### Each Session
 
-1. Read `progress.txt` — especially the **Codebase Patterns** section at the top
-2. Check the branch, pull latest
-3. Implement the story described in your task input
-4. Run quality checks (`npm run build`, typecheck, etc.)
-5. Commit: `feat: <story-id> - <story-title> (closes #N)` — where N is the GitHub issue number from the issues mapping. If no issue exists, omit the closes reference.
-6. Append to `progress.txt` (see format below)
-7. Update **Codebase Patterns** in `progress.txt` if you found reusable patterns
-8. Update `AGENTS.md` if you learned something structural about the codebase
+1. **Query dependency graph** to get the next ready task (see top of this file)
+2. Read `progress.txt` — especially the **Codebase Patterns** section at the top
+3. Check the branch, pull latest
+4. **Update dependency graph** to mark story as in_progress:
+   ```bash
+   ~/path/to/antfarm/scripts/update-dependency-graph.sh start "$STORY_ID" .
+   git add dependency-graph.json
+   git commit -m "chore: Mark $STORY_ID as in progress"
+   git push
+   ```
+5. Implement the story described in your task input
+6. Run quality checks (`npm run build`, typecheck, etc.)
+7. Commit: `feat: <story-id> - <story-title> (closes #N)` — where N is the GitHub issue number from the issues mapping. If no issue exists, omit the closes reference.
+8. Append to `progress.txt` (see format below)
+9. Update **Codebase Patterns** in `progress.txt` if you found reusable patterns
+10. Update `AGENTS.md` if you learned something structural about the codebase
+11. **DO NOT update dependency graph to "complete"** — the verifier does that after verification
 
 ### progress.txt Format
 

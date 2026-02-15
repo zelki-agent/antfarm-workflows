@@ -25,6 +25,17 @@ agents:
         SOUL.md: agents/planner/SOUL.md
         IDENTITY.md: agents/planner/IDENTITY.md
 
+  - id: dependency-mapper
+    name: Dependency Mapper
+    role: analysis
+    description: Creates dependency graph for parallel execution.
+    workspace:
+      baseDir: agents/dependency-mapper
+      files:
+        AGENTS.md: agents/dependency-mapper/AGENTS.md
+        SOUL.md: agents/dependency-mapper/SOUL.md
+        IDENTITY.md: agents/dependency-mapper/IDENTITY.md
+
   - id: setup
     name: Setup
     role: coding
@@ -115,6 +126,45 @@ steps:
       STORIES_JSON: [ ... array of story objects ... ]
       GITHUB_ISSUES_JSON: [ {"story_id": "US-001", "issue_number": 42, "issue_url": "..."}, ... ]
       GITHUB_PROJECT: <project-number or "none">
+    expects: "STATUS: done"
+    max_retries: 2
+    on_fail:
+      escalate_to: human
+
+  - id: map-dependencies
+    agent: dependency-mapper
+    input: |
+      Create a dependency graph for parallel execution.
+
+      TASK:
+      {{task}}
+
+      REPO: {{repo}}
+      BRANCH: {{branch}}
+      STORIES_JSON: {{stories_json}}
+      GITHUB_ISSUES_JSON: {{github_issues_json}}
+
+      Instructions:
+      1. Read the user stories from STORIES_JSON
+      2. Analyze dependencies between stories
+      3. Create dependency-graph.json with:
+         - Story metadata (id, title, issue_number)
+         - Dependencies (which stories depend on which)
+         - Parallel groups (stories that can run simultaneously)
+         - Initial status (ready_to_pick, blocked, etc.)
+      4. Save to repo root: dependency-graph.json
+      5. Commit and push
+      6. Create scripts/query-next-task.sh if it doesn't exist
+      7. Create scripts/update-dependency-graph.sh if it doesn't exist
+      8. Post summary comment on main issue
+
+      Reply with:
+      STATUS: done
+      GRAPH_FILE: dependency-graph.json
+      TOTAL_STORIES: <number>
+      PARALLEL_GROUPS: <number>
+      READY_TO_PICK: <comma-separated story IDs>
+      PARALLELIZATION_POTENTIAL: <percentage>
     expects: "STATUS: done"
     max_retries: 2
     on_fail:
