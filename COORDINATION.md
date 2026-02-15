@@ -1,393 +1,480 @@
-# Multi-Agent Coordination Guide
+# Multi-Agent Coordination Mechanisms
 
-This document explains how multiple uncoordinated antfarm agents safely collaborate on the same repository.
+This document details the 12 coordination mechanisms that enable multiple independent antfarm agents to collaborate safely on the same GitHub repository without collisions or conflicts.
 
-## Problem Statement
+## Overview
 
-When multiple agents work independently on the same repository, several failure modes can occur:
-- **Race conditions** — Two agents start work on the same issue
-- **Merge conflicts** — Agents modify the same files in parallel PRs
-- **Stale branches** — Agent's work becomes outdated while in progress
-- **Resource exhaustion** — Too many agents running simultaneously
-- **Silent failures** — Crashed workflows leave issues "claimed" forever
-- **Semantic conflicts** — Overlapping architectural changes
+When multiple agents (potentially on different machines, with different operators) all work on the same repository, these mechanisms prevent:
+- ❌ Duplicate work (two agents claim the same issue)
+- ❌ Merge conflicts (agents modify the same files)
+- ❌ Stale branches (agent works on outdated code)
+- ❌ Resource exhaustion (too many concurrent workflows)
+- ❌ Abandoned work (agent crashes, issue stuck forever)
+- ❌ Semantic conflicts (changes that contradict each other)
 
-## Solution: Multi-Layer Coordination
+---
 
-### 1. Atomic Claiming
+## 1. Atomic Claiming via Issue Assignment
 
-**Mechanism:** GitHub issue assignment + labels
+**Problem**: Race condition where two agents both claim an issue simultaneously.
+
+**Solution**: Use GitHub's issue assignment as an atomic lock.
 
 ```bash
-# Before starting work
+# Check if already assigned
+ASSIGNEES=$(gh issue view $ISSUE_NUM --json assignees --jq '.assignees[].login')
+if [ -n "$ASSIGNEES" ]; then
+  echo "Already claimed by $ASSIGNEES"
+  exit 1
+fi
+
+# Atomically assign + label
 gh issue edit $ISSUE_NUM --add-assignee "@me" --add-label "🟢 workflow-active"
 ```
 
-**Benefits:**
-- Atomic operation prevents race conditions
-- Visible in GitHub UI
-- Leverages native GitHub features
+**Implementation**:
+- Planner agent (step 2 of claiming)
+- Triager agent (bug-fix workflow)
+- Scanner agent (security-audit workflow)
 
-**Fallback:** If assignment fails, abort immediately to prevent collision
-
----
-
-### 2. Time-To-Live (TTL) Claims
-
-**Mechanism:** Expiry timestamp in claim comment
-
-```markdown
-**Claim expires:** 2026-02-15 14:00:00 UTC
-```
-
-**Monitoring:** Cron job (`scripts/workflow-monitor.sh`) runs every 30 minutes:
-- Checks for expired claims
-- Unassigns issue
-- Posts timeout comment
-- Adds `🔴 workflow-failed` label
-
-**Configuration:**
-```bash
-# Default 4 hours
-CLAIM_TTL_HOURS=4
-
-# In claim comment
-CLAIM_EXPIRY=$(date -u -d '+4 hours' +"%Y-%m-%d %H:%M:%S UTC")
-```
+**Verification**: Check issue page - should show assignee immediately after claim.
 
 ---
 
-### 3. Progress Heartbeats
+## 2. Concurrency Limiting
 
-**Mechanism:** Periodic update comments
+**Problem**: 10 agents all start workflows at once, exhaust server resources (memory, CPU, disk I/O).
 
-```bash
-# Every 10 minutes during workflow execution
-gh issue comment $ISSUE_NUM --body "🔄 **Workflow progress update**
-**Run ID:** \`$RUN_ID\`
-**Current:** Story 3/12
-**Last update:** $(date -u)"
-```
-
-**Detection:** Monitoring script flags issues with no heartbeat in 30+ minutes
-
-**Benefits:**
-- Early failure detection
-- Visible progress for humans
-- Enables automatic cleanup
-
----
-
-### 4. Concurrency Limiting
-
-**Mechanism:** Label-based counting
+**Solution**: Limit concurrent workflows per repo using label count.
 
 ```bash
-ACTIVE_COUNT=$(gh issue list --label "🟢 workflow-active" --jq 'length')
-MAX_CONCURRENT=3  # Configurable per repo
+ACTIVE_COUNT=$(gh issue list --label "🟢 workflow-active" --json number --jq 'length')
+MAX_CONCURRENT=3
 
 if [ "$ACTIVE_COUNT" -ge "$MAX_CONCURRENT" ]; then
   echo "Concurrency limit reached. Waiting..."
   sleep 60
+  # Retry or queue
 fi
 ```
 
-**Benefits:**
-- Prevents resource exhaustion (memory, CPU, rate limits)
-- Keeps PR review queue manageable
-- Reduces merge conflict probability
+**Configuration**:
+- Default: 3 concurrent workflows
+- Override: Set `ANTFARM_MAX_CONCURRENT` env var
+- Per-repo: Set GitHub repository variable
 
-**Configuration:** Set per repository based on:
-- Available resources
-- Review team size
-- Code complexity
+**Implementation**: Planner agent (step 1 of claiming)
 
 ---
 
-### 5. Pre-PR Safety Checks
+## 3. File Overlap Detection
 
-**Mechanism:** Comprehensive checks before PR creation
+**Problem**: Agent A working on auth module, Agent B working on "refactor auth" - semantic conflict even if different issues.
+
+**Solution**: Query open PRs, compare changed files, warn if >50% overlap.
 
 ```bash
-# 1. Freshness check
+# Get files changed in open PRs
+OPEN_PRS=$(gh pr list --json number,files)
+
+# Compare with estimated changes for this task
+# (heuristic: keywords, file paths mentioned in task)
+```
+
+**Limitations**:
+- Can't perfectly predict file changes before planning
+- Heuristic-based (keywords in task description)
+- Provides warning, not blocking
+
+**Implementation**: Planner agent (step 3 of claiming)
+
+---
+
+## 4. TTL-Based Unclaiming
+
+**Problem**: Agent claims issue, crashes 10 minutes in. Issue is assigned forever, blocks future work.
+
+**Solution**: Claims include expiry timestamp. Monitoring script auto-unclaims after TTL.
+
+```bash
+# When claiming
+CLAIM_EXPIRY=$(date -u -d '+4 hours' +"%Y-%m-%d %H:%M:%S UTC")
+gh issue comment $ISSUE_NUM --body "Claim expires: $CLAIM_EXPIRY"
+
+# Monitoring script (run periodically)
+# Checks all active issues, unassigns if expired and no progress updates
+```
+
+**Configuration**:
+- Default TTL: 4 hours
+- Override: `ANTFARM_CLAIM_TTL_HOURS` env var
+
+**Implementation**:
+- Claiming: All first-stage agents (planner, triager, scanner)
+- Monitoring: `scripts/monitor-claims.sh` (run via cron or GitHub Actions)
+
+**Monitoring Setup**:
+```bash
+# Manual run
+./scripts/monitor-claims.sh owner/repo
+
+# Cron (every 30 minutes)
+*/30 * * * * /path/to/scripts/monitor-claims.sh owner/repo
+
+# GitHub Actions
+# See .github/workflows/antfarm-coordination.yml
+```
+
+---
+
+## 5. Progress Heartbeats
+
+**Problem**: Hard to distinguish "workflow is working" from "workflow crashed" without frequent updates.
+
+**Solution**: Agents post progress comments every 10 minutes.
+
+```bash
+# Created during claiming
+cat > /tmp/heartbeat_${RUN_ID}.sh <<'EOF'
+gh issue comment $ISSUE_NUM --body "Progress: Story $N/$TOTAL"
+EOF
+
+# Called periodically by workflow runner every 10 minutes
+```
+
+**Benefits**:
+- Enables accurate staleness detection
+- Provides visibility into workflow progress
+- Reassures humans that work is ongoing
+
+**Implementation**: Planner agent creates heartbeat script (step 6 of claiming)
+
+---
+
+## 6. Standardized Branch Naming
+
+**Problem**: Different agents create overlapping or confusing branch names.
+
+**Solution**: Enforce consistent naming convention.
+
+```bash
+BRANCH_NAME="<type>/<issue-number>-<slug>"
+# Examples:
+#   feature/42-add-dark-mode
+#   bugfix/55-null-pointer-fix
+#   security/100-sql-injection-fix
+```
+
+**Benefits**:
+- Easy mapping from issue to branch
+- Prevents name collisions
+- Clear intent from branch name
+
+**Implementation**: Planner agent (step 5 of claiming)
+
+---
+
+## 7. Pre-PR Freshness Checks
+
+**Problem**: Agent works for 2 hours. Meanwhile, 3 PRs merge to main. Agent creates PR based on stale code.
+
+**Solution**: Before creating PR, fetch latest main and auto-rebase if needed.
+
+```bash
 git fetch origin main
+
 if ! git merge-base --is-ancestor HEAD origin/main; then
+  echo "Branch is stale. Auto-rebasing..."
   git rebase origin/main
-  # Re-run tests after rebase
+  npm test  # Re-run tests after rebase
 fi
+```
 
-# 2. Conflict detection (dry-run merge)
+**Implementation**: PR creation step (see `workflows/feature-dev/agents/developer/PR-CREATION.md`)
+
+**Result**: PRs are always up-to-date with main at creation time.
+
+---
+
+## 8. Pre-PR Conflict Detection
+
+**Problem**: Agent creates PR, maintainer tries to merge, discovers conflicts.
+
+**Solution**: Test-merge main before creating PR. Attempt auto-resolution or warn.
+
+```bash
+# Test merge (don't commit)
+git checkout -b test-merge-$BRANCH
 git merge --no-commit --no-ff origin/main
+
 if [ $? -ne 0 ]; then
-  # Handle conflicts or abort
+  # Conflicts detected
+  # Try simple auto-resolution (e.g., regenerate lock files)
+  # If can't resolve, post warning comment
 fi
 
-# 3. Quality gates
-pnpm test
-pnpm build
-pnpm typecheck
+git merge --abort
 ```
 
-**Benefits:**
-- Prevents broken PRs
-- Catches staleness early
-- Auto-resolves simple conflicts
+**Auto-Resolution Strategies**:
+- Lock file conflicts → regenerate (`npm install`)
+- Simple formatting conflicts → apply prettier
+- More complex → warn and let human resolve
+
+**Implementation**: PR creation step (PR-CREATION.md #2)
 
 ---
 
-### 6. File Overlap Detection
+## 9. Auto-Rebase Stale PRs
 
-**Mechanism:** Compare with open PRs before claiming
+**Problem**: PR is created clean, but main advances. Now PR is stale and has conflicts.
+
+**Solution**: Periodic script (or GitHub Action) auto-rebases open antfarm PRs.
 
 ```bash
-# Get files from open PRs
-OPEN_PR_FILES=$(gh pr list --json files --jq '.[].files[].path')
-
-# Estimate files this workflow will touch (heuristic)
-# Warn if >50% overlap detected
+# For each open PR with "🤖 antfarm" label:
+#   1. Check if behind main
+#   2. Attempt rebase
+#   3. Run tests
+#   4. Push if tests pass
+#   5. Comment on PR with result
 ```
 
-**Benefits:**
-- Early warning of potential conflicts
-- Allows coordination before work starts
-- Heuristic-based (not perfect, but helpful)
+**Implementation**: `scripts/auto-rebase-prs.sh`
 
----
-
-### 7. Auto-Rebase for Stale PRs
-
-**Mechanism:** GitHub Action (`.github/workflows/auto-rebase-prs.yml`)
-
-Runs every 6 hours + on main push:
-- Fetches open PRs with antfarm labels
-- Checks if behind main
-- Auto-rebases if no conflicts
-- Re-runs CI
-- Labels PRs needing manual rebase
-
-**Benefits:**
-- Keeps PRs fresh
-- Reduces manual rebase work
-- Automatically re-runs tests
-
----
-
-### 8. Failure Reporting
-
-**Mechanism:** Error handling in all agents
-
-```bash
-# On any failure
-gh issue comment $ISSUE_NUM --body "❌ **Workflow failure**
-**Run ID:** \`$RUN_ID\`
-**Error:** $ERROR_MESSAGE
-**Stage:** $CURRENT_STAGE
-**Logs:** <link-to-logs>
-
-Issue is now available for reassignment."
-
-gh issue edit $ISSUE_NUM \
-  --remove-assignee "@me" \
-  --remove-label "🟢 workflow-active" \
-  --add-label "🔴 workflow-failed"
-```
-
-**Benefits:**
-- Immediate visibility of failures
-- Issue automatically released for retry
-- Diagnostic information preserved
-
----
-
-### 9. Architectural Decision Records
-
-**Mechanism:** Shared document (`docs/architectural-decisions.md`)
-
-Agents:
-1. Read ADRs before planning
-2. Follow established patterns
-3. Add new ADRs when making architectural decisions
-
-**Benefits:**
-- Consistency across parallel work
-- Prevents conflicting approaches
-- Knowledge sharing
-
----
-
-### 10. Standardized Branch Naming
-
-**Mechanism:** Format `<type>/<issue-num>-<slug>`
-
-Examples:
-- `feature/123-user-authentication`
-- `bugfix/456-null-pointer-fix`
-- `security/789-sql-injection-patch`
-
-**Benefits:**
-- Clear issue→branch mapping
-- Prevents naming collisions
-- Enables tooling
-
----
-
-## Setup
-
-### 1. Install Monitoring Script
-
-```bash
-# Add to crontab (run every 30 minutes)
-*/30 * * * * ANTFARM_REPO=owner/repo /path/to/scripts/workflow-monitor.sh >> /var/log/antfarm-monitor.log 2>&1
-```
-
-Or use GitHub Actions (recommended):
+**Scheduling**:
 ```yaml
-# .github/workflows/workflow-monitor.yml
-name: Workflow Monitor
+# GitHub Actions (every 30 minutes)
 on:
   schedule:
     - cron: '*/30 * * * *'
-  workflow_dispatch:
-
-jobs:
-  monitor:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - env:
-          ANTFARM_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/workflow-monitor.sh
 ```
 
-### 2. Enable Auto-Rebase Action
+**Benefits**:
+- PRs stay up-to-date automatically
+- Reduces merge conflicts
+- Catches test failures early
 
-Copy `.github/workflows/auto-rebase-prs.yml` to your repository.
+---
 
-Requires:
-- `contents: write` permission
-- `pull-requests: write` permission
+## 10. Failure Reporting
 
-### 3. Configure Labels
+**Problem**: Agent crashes. Issue is claimed, no updates, unclear what happened.
+
+**Solution**: On workflow failure, post detailed comment with logs.
 
 ```bash
-gh label create "🟢 workflow-active" --color "0e8a16" --description "Antfarm workflow in progress"
-gh label create "🔴 workflow-failed" --color "d73a4a" --description "Antfarm workflow failed"
-gh label create "needs-rebase" --color "fbca04" --description "PR needs manual rebase"
+# On crash/error
+gh issue comment $ISSUE_NUM --body "❌ Workflow failed
+
+**Run ID:** $RUN_ID
+**Error:** $ERROR_MESSAGE
+**Logs:** antfarm logs $RUN_ID
+
+---
+*Issue auto-unclaimed. Available for retry.*"
+
+# Unassign and update labels
+gh issue edit $ISSUE_NUM --remove-assignee "@me" --add-label "🔴 workflow-failed"
 ```
 
-### 4. Set Concurrency Limit
+**Implementation**:
+- PR creation step (error handling)
+- Workflow runner (exception handlers)
 
-In each workflow's planner agent, set:
-```bash
-MAX_CONCURRENT=3  # Adjust based on repo/team size
+---
+
+## 11. Architectural Decision Log (ADR)
+
+**Problem**: Agent A makes architectural decision in PR #5. Agent B (PR #6) doesn't know, implements contradictory approach.
+
+**Solution**: Agents write ADRs to `docs/decisions/`, read recent ADRs before planning.
+
+**ADR Format**:
+```markdown
+# ADR-005: Use PostgreSQL for Primary Database
+
+**Date**: 2026-02-15
+**Status**: Accepted
+
+## Context
+We need a primary database for the application...
+
+## Decision
+We will use PostgreSQL 16...
+
+## Consequences
+- Developers must have PostgreSQL installed...
 ```
 
-### 5. Configure Claim TTL
+**Implementation**:
+- Planner reads `docs/decisions/` (step 4 of pre-PR checks)
+- Developer writes ADRs for significant decisions
+- PR description references related ADRs
 
-Default is 4 hours. Adjust based on typical workflow duration:
+**Benefits**:
+- Shared context across agents
+- Prevents contradictory decisions
+- Documents rationale
+
+---
+
+## 12. Work Queue Management
+
+**Problem**: Issues come in faster than agents can handle. Need prioritization.
+
+**Solution**: Use GitHub Projects as a work queue.
+
+**Setup**:
 ```bash
-CLAIM_TTL_HOURS=4  # Increase for long-running tasks
+# Create project board
+gh project create --owner <org> --title "Antfarm Queue"
+
+# Columns:
+#   - Backlog
+#   - Ready
+#   - In Progress (auto: when issue assigned + workflow-active label)
+#   - Review (auto: when PR created)
+#   - Done (auto: when issue closed)
+```
+
+**Agent Behavior**:
+- Only claim issues from "Ready" column
+- Move to "In Progress" when claimed
+- Move to "Review" when PR created
+
+**Benefits**:
+- Clear visibility into queue depth
+- Enables prioritization (drag issues)
+- Prevents overwhelming the system
+
+**Implementation**: Optional - requires project board setup per repo.
+
+---
+
+## Coordination Summary
+
+| Mechanism | Prevents | Implementation | Frequency |
+|-----------|----------|----------------|-----------|
+| Atomic Claiming | Duplicate work | Planner/Triager/Scanner | Per workflow start |
+| Concurrency Limiting | Resource exhaustion | Planner | Per workflow start |
+| File Overlap Detection | Semantic conflicts | Planner | Per workflow start |
+| TTL Unclaiming | Abandoned work | Monitor script | Every 30 min |
+| Progress Heartbeats | Stale detection uncertainty | All agents | Every 10 min |
+| Standardized Branches | Name collisions | Planner | Per workflow start |
+| Freshness Checks | Stale PRs | PR creation | Per PR |
+| Conflict Detection | Merge conflicts | PR creation | Per PR |
+| Auto-Rebase PRs | Stale PRs post-creation | Rebase script | Every 30 min |
+| Failure Reporting | Silent failures | Error handlers | On error |
+| ADR | Design conflicts | Planner/Developer | As needed |
+| Work Queue | Overload | GitHub Projects | Continuous |
+
+---
+
+## Monitoring Dashboard
+
+Recommended monitoring queries:
+
+```bash
+# Active workflows
+gh issue list --repo owner/repo --label "🟢 workflow-active"
+
+# Failed workflows
+gh issue list --repo owner/repo --label "🔴 workflow-failed"
+
+# Stale workflows (manually flagged)
+gh issue list --repo owner/repo --label "🔴 workflow-stale"
+
+# Open antfarm PRs
+gh pr list --repo owner/repo --label "🤖 antfarm"
+
+# PRs needing rebase
+gh pr list --repo owner/repo --label "needs-rebase"
+```
+
+**Grafana/Prometheus Metrics** (if using monitoring):
+- `antfarm_workflows_active{repo="owner/repo"}` - Active workflow count
+- `antfarm_workflows_completed{repo="owner/repo"}` - Completed workflows
+- `antfarm_workflows_failed{repo="owner/repo"}` - Failed workflows
+- `antfarm_pr_rebase_count{repo="owner/repo"}` - Auto-rebases performed
+
+---
+
+## Testing Coordination
+
+To test coordination mechanisms without real work:
+
+```bash
+# Terminal 1: Start workflow A
+antfarm workflow run feature-dev "Test task A (issue #10)"
+
+# Terminal 2: Try to start workflow B on same issue (should be blocked)
+antfarm workflow run feature-dev "Test task B (issue #10)"
+# Expected: "Issue already assigned" - claim prevented
+
+# Terminal 3: Start workflow C on different issue (should succeed)
+antfarm workflow run feature-dev "Test task C (issue #11)"
+
+# Check concurrency limit
+gh issue list --label "🟢 workflow-active" | wc -l
+# Should not exceed MAX_CONCURRENT
 ```
 
 ---
 
-## Monitoring
+## Maintenance
 
-### Check Active Workflows
+### Regular Tasks
 
+**Daily**:
+- Review failed workflows: `gh issue list --label "🔴 workflow-failed"`
+- Check concurrency limits aren't consistently hit
+
+**Weekly**:
+- Review stale PRs: `gh pr list --label "needs-rebase"`
+- Check TTL unclaiming is working (no stale assignments)
+- Review ADR directory for clarity
+
+**Monthly**:
+- Analyze workflow success rate
+- Adjust concurrency limits if needed
+- Update coordination scripts if GitHub API changes
+
+### Troubleshooting
+
+**Issue stuck with active label but no assignee**:
 ```bash
-gh issue list --label "🟢 workflow-active"
+gh issue edit <issue> --remove-label "🟢 workflow-active"
 ```
 
-### Check Failed Workflows
-
+**Multiple agents claimed same issue** (race condition):
 ```bash
-gh issue list --label "🔴 workflow-failed"
+# Manually unassign all but one
+gh issue edit <issue> --remove-assignee <username>
 ```
 
-### Check Stale PRs
-
+**PR won't auto-rebase** (conflicts):
 ```bash
-gh pr list --label "needs-rebase"
+# Check PR status
+gh pr view <pr>
+# Look for "needs-rebase" label
+# Resolve manually
 ```
-
-### View Workflow Logs
-
-```bash
-# Via antfarm CLI
-antfarm logs <run-id>
-
-# Via issue comments
-gh issue view <issue-num> --comments
-```
-
----
-
-## Troubleshooting
-
-### Issue Stuck as "Claimed"
-
-Run workflow monitor manually:
-```bash
-ANTFARM_REPO=owner/repo ./scripts/workflow-monitor.sh
-```
-
-Or manually unclaim:
-```bash
-gh issue edit <issue-num> \
-  --remove-assignee <user> \
-  --remove-label "🟢 workflow-active"
-```
-
-### PR Has Merge Conflicts
-
-1. Check if labeled `needs-rebase`
-2. Rebase manually:
-   ```bash
-   git checkout <branch>
-   git pull origin <branch>
-   git rebase origin/main
-   # Resolve conflicts
-   git push --force-with-lease origin <branch>
-   ```
-3. Label automatically removed on next auto-rebase run
-
-### Concurrency Limit Too Restrictive
-
-Increase `MAX_CONCURRENT` in workflow configs, or temporarily override:
-```bash
-# Remove active label from completed issues
-gh issue edit <issue-num> --remove-label "🟢 workflow-active"
-```
-
-### Too Many Progress Comments
-
-Comments are intentionally frequent (every 10 min) for failure detection. To reduce noise:
-- Use GitHub's "Hide" feature on bot comments
-- Or increase heartbeat interval (trade-off: slower failure detection)
-
----
-
-## Best Practices
-
-1. **Monitor the queue** — Check active workflow count regularly
-2. **Review ADRs** — Keep architectural decisions in sync
-3. **Label cleanup** — Periodically audit and clean up stale labels
-4. **Adjust limits** — Tune concurrency based on actual usage
-5. **Log review** — Check monitoring logs for patterns
 
 ---
 
 ## Future Enhancements
 
 Potential additions:
-- **Distributed locking** — Use Redis/DynamoDB for more robust claiming
-- **Work queue** — Formal queue system instead of polling labels
-- **Conflict prediction** — ML-based prediction of likely conflicts
-- **Auto-merge** — Automatically merge PRs that pass all checks (with approval rules)
-- **Workflow prioritization** — Priority queue for critical bugs
+
+1. **Distributed Lock Service** - Use Redis/etcd for stricter atomic claims
+2. **Workflow Priority Queues** - Critical bugs jump the queue
+3. **Resource Quotas** - Per-agent limits on active workflows
+4. **Smart Conflict Prediction** - ML model predicts file conflicts before work starts
+5. **Cross-Repo Coordination** - Coordinate across microservice repos
+6. **Workflow Checkpointing** - Resume from last good state on failure
 
 ---
 
-This coordination system makes antfarm agents production-ready for real-world collaborative development at scale.
+**Last Updated**: 2026-02-15  
+**Version**: 1.0.0
