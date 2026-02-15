@@ -11,41 +11,62 @@ You perform a comprehensive security audit of the codebase. You are the first ag
 
 ## Claiming Work: Prevent Workflow Collisions
 
-**Before starting any scanning work**, leave a comment on the related issue to signal that this antfarm workflow has claimed the work. This prevents parallel workflows from colliding.
+**Before starting any scanning work**, atomically claim the issue using the full coordination protocol.
 
-### Steps
+### Step 1-5: Same as Feature-Dev Planner
 
-1. **Extract issue number from task description:**
-   - Look for patterns like `#123`, `issue/123`, or URLs like `github.com/owner/repo/issues/123`
+Follow the same claiming protocol as the feature-dev planner agent:
+1. Check concurrency limit (max 3 concurrent)
+2. Atomic claiming via issue assignment + label
+3. Post claiming comment with 4-hour TTL expiry
+4. Create standardized branch (`security/<issue>-<slug>`)
+5. Set up progress heartbeat script
 
-2. **Leave a claiming comment:**
-   ```bash
-   gh issue comment <issue-number> --repo <owner/repo> --body "🐜 Antfarm security-audit workflow started
-   
-   **Run ID:** \`$ANTFARM_RUN_ID\`
-   **Workflow:** security-audit
-   **Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-   
-   Running comprehensive security scan now. Will prioritize findings, implement fixes, and create a PR. You can track progress via the antfarm CLI."
-   ```
+Branch naming for security audits:
+```bash
+BRANCH_NAME="security/${ISSUE_NUM}-${SLUG}"
+```
 
-3. **Get the run ID from environment:**
-   - The run ID should be available via `$ANTFARM_RUN_ID` environment variable
-   - If not available, extract it from the working directory path or use fallback
+Claiming comment:
+```bash
+gh issue comment $ISSUE_NUM --repo $REPO --body "🐜 **Antfarm security-audit workflow started**
 
-### Error Handling
+**Run ID:** \`$RUN_ID\`
+**Workflow:** security-audit
+**Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Claim expires:** $CLAIM_EXPIRY
 
-If unable to post the comment (no issue found, `gh` not authenticated, etc.):
-- Log a warning but **continue with scanning**
-- The claiming comment is for coordination, not a hard requirement
+Scanning → prioritizing → fixing → testing → PR
+Progress updates will be posted here."
+```
+
+### Failure Reporting
+
+On scan failure:
+```bash
+gh issue comment $ISSUE_NUM --repo $REPO --body "❌ **Security audit workflow failure**
+**Run ID:** \`$RUN_ID\`
+**Stage:** Scanning
+**Error:** $ERROR_MESSAGE
+Issue unclaimed and available for retry."
+
+gh issue edit $ISSUE_NUM --repo $REPO \
+  --remove-assignee "@me" \
+  --remove-label "🟢 workflow-active" \
+  --add-label "🔴 workflow-failed"
+```
 
 ### Output Format
 
 Add to your final output:
 
 ```
-CLAIMED_ISSUE: <issue-number or "none">
-CLAIMED_COMMENT_URL: <url or "none">
+CLAIMED_ISSUE: <issue-number>
+ASSIGNED_TO: <github-username>
+BRANCH_NAME: security/<issue>-<slug>
+CLAIM_EXPIRY: <iso-timestamp>
+HEARTBEAT_SCRIPT: /tmp/heartbeat_<run-id>.sh
+VULNERABILITY_COUNT: <number>
 ```
 
 ## What to Scan For

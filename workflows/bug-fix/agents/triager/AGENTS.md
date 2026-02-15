@@ -13,41 +13,101 @@ You analyze bug reports, explore the codebase to find affected areas, attempt to
 
 ## Claiming Work: Prevent Workflow Collisions
 
-**Before starting any triage work**, leave a comment on the related issue to signal that this antfarm workflow has claimed the work. This prevents parallel workflows from colliding.
+**Before starting any triage work**, atomically claim the issue using the full coordination protocol.
 
-### Steps
+### Step 1: Check Concurrency Limit
 
-1. **Extract issue number from task description:**
-   - Look for patterns like `#123`, `issue/123`, or URLs like `github.com/owner/repo/issues/123`
+```bash
+ACTIVE_COUNT=$(gh issue list --repo <owner/repo> --label "🟢 workflow-active" --json number --jq 'length')
+MAX_CONCURRENT=3
 
-2. **Leave a claiming comment:**
-   ```bash
-   gh issue comment <issue-number> --repo <owner/repo> --body "🐜 Antfarm bug-fix workflow started
-   
-   **Run ID:** \`$ANTFARM_RUN_ID\`
-   **Workflow:** bug-fix
-   **Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-   
-   Triaging the issue now. Will investigate root cause, implement fix, and create a PR. You can track progress via the antfarm CLI."
-   ```
+if [ "$ACTIVE_COUNT" -ge "$MAX_CONCURRENT" ]; then
+  echo "❌ Concurrency limit reached. Waiting..."
+  sleep 60
+fi
+```
 
-3. **Get the run ID from environment:**
-   - The run ID should be available via `$ANTFARM_RUN_ID` environment variable
-   - If not available, extract it from the working directory path or use fallback
+### Step 2: Atomic Claiming
 
-### Error Handling
+```bash
+ISSUE_NUM=<extract-from-task>
+REPO="owner/repo"
 
-If unable to post the comment (no issue found, `gh` not authenticated, etc.):
-- Log a warning but **continue with triage**
-- The claiming comment is for coordination, not a hard requirement
+# Check if already claimed
+ASSIGNEES=$(gh issue view $ISSUE_NUM --repo $REPO --json assignees --jq '.assignees[].login')
+if [ -n "$ASSIGNEES" ]; then
+  echo "❌ Issue already assigned. Aborting."
+  exit 1
+fi
+
+# Atomically assign + label
+gh issue edit $ISSUE_NUM --repo $REPO --add-assignee "@me" --add-label "🟢 workflow-active"
+```
+
+### Step 3: Post Claiming Comment with TTL
+
+```bash
+CLAIM_EXPIRY=$(date -u -d '+4 hours' +"%Y-%m-%d %H:%M:%S UTC")
+RUN_ID="${ANTFARM_RUN_ID:-$(uuidgen)}"
+
+gh issue comment $ISSUE_NUM --repo $REPO --body "🐜 **Antfarm bug-fix workflow started**
+
+**Run ID:** \`$RUN_ID\`
+**Workflow:** bug-fix
+**Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Claim expires:** $CLAIM_EXPIRY
+
+Triaging → investigating → fixing → testing → PR
+Progress updates will be posted here."
+```
+
+### Step 4: Create Standardized Branch
+
+```bash
+SLUG=$(echo "$TASK" | head -c 50 | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '-' | sed 's/^-//;s/-$//')
+BRANCH_NAME="bugfix/${ISSUE_NUM}-${SLUG}"
+git checkout -b "$BRANCH_NAME"
+```
+
+### Step 5: Set Up Progress Heartbeat
+
+Create heartbeat script for periodic updates (called by workflow runner):
+
+```bash
+cat > /tmp/heartbeat_${RUN_ID}.sh <<'EOF'
+#!/bin/bash
+gh issue comment $1 --repo $2 --body "🔄 **Workflow progress: $3**
+**Last update:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
+EOF
+chmod +x /tmp/heartbeat_${RUN_ID}.sh
+```
+
+### Error Handling & Failure Reporting
+
+On any failure:
+```bash
+gh issue comment $ISSUE_NUM --repo $REPO --body "❌ **Workflow failure**
+**Run ID:** \`$RUN_ID\`
+**Stage:** Triage
+**Error:** $ERROR_MESSAGE
+Issue unclaimed and available for retry."
+
+gh issue edit $ISSUE_NUM --repo $REPO \
+  --remove-assignee "@me" \
+  --remove-label "🟢 workflow-active" \
+  --add-label "🔴 workflow-failed"
+```
 
 ### Output Format
 
 Add to your final output:
 
 ```
-CLAIMED_ISSUE: <issue-number or "none">
-CLAIMED_COMMENT_URL: <url or "none">
+CLAIMED_ISSUE: <issue-number>
+ASSIGNED_TO: <github-username>
+BRANCH_NAME: bugfix/<issue>-<slug>
+CLAIM_EXPIRY: <iso-timestamp>
+HEARTBEAT_SCRIPT: /tmp/heartbeat_<run-id>.sh
 ```
 
 ## Severity Classification

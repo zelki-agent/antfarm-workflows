@@ -14,52 +14,151 @@ You decompose a task into ordered user stories for autonomous execution by a dev
 
 ## Claiming Work: Prevent Workflow Collisions
 
-**Before starting any planning work**, leave a comment on the related issue or PR to signal that this antfarm workflow has claimed the work. This prevents parallel workflows from colliding.
+**Before starting any planning work**, atomically claim the issue to prevent parallel workflows from colliding. This involves multiple coordination mechanisms.
 
-### Steps
+### Step 1: Check Concurrency Limit
 
-1. **Extract issue/PR number from task description:**
-   - Look for patterns like `#123`, `issue/123`, `PR #456`, or URLs like `github.com/owner/repo/issues/123`
-   - If multiple issues mentioned, comment on the primary one (usually the first or most relevant)
+Before claiming, check if the repo has reached its concurrent workflow limit:
 
-2. **Leave a claiming comment:**
-   ```bash
-   # For an issue:
-   gh issue comment <issue-number> --repo <owner/repo> --body "🐜 Antfarm workflow started
-   
-   **Run ID:** \`$RUN_ID\`
-   **Workflow:** feature-dev
-   **Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-   
-   This workflow will work through the implementation and create a PR when ready. You can track progress via the antfarm CLI."
-   
-   # For a PR:
-   gh pr comment <pr-number> --repo <owner/repo> --body "🐜 Antfarm workflow started to address feedback
-   
-   **Run ID:** \`$RUN_ID\`
-   **Workflow:** feature-dev
-   **Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-   
-   Working through the requested changes now. Will push updates to this PR when complete."
-   ```
+```bash
+# Count active workflows
+ACTIVE_COUNT=$(gh issue list --repo <owner/repo> --label "🟢 workflow-active" --json number --jq 'length')
+MAX_CONCURRENT=3  # Configurable per repo
 
-3. **Get the run ID from environment:**
-   - The run ID should be available via `$ANTFARM_RUN_ID` environment variable
-   - If not available, extract it from the working directory path or use `hostname` or `uuidgen` as fallback
+if [ "$ACTIVE_COUNT" -ge "$MAX_CONCURRENT" ]; then
+  echo "❌ Concurrency limit reached ($ACTIVE_COUNT/$MAX_CONCURRENT active workflows)"
+  echo "Waiting 60 seconds before retry..."
+  sleep 60
+  # Retry check or fail gracefully
+fi
+```
+
+### Step 2: Atomic Claiming via Issue Assignment + Label
+
+Atomically claim the issue to prevent race conditions:
+
+```bash
+# Extract issue number from task
+ISSUE_NUM=$(echo "$TASK" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+REPO="owner/repo"  # Extract from task or config
+
+# Check if already claimed
+ASSIGNEES=$(gh issue view $ISSUE_NUM --repo $REPO --json assignees --jq '.assignees[].login')
+if [ -n "$ASSIGNEES" ]; then
+  echo "❌ Issue already assigned to: $ASSIGNEES"
+  echo "Aborting to prevent collision."
+  exit 1
+fi
+
+# Atomically assign + label
+gh issue edit $ISSUE_NUM --repo $REPO \
+  --add-assignee "@me" \
+  --add-label "🟢 workflow-active"
+```
+
+### Step 3: Check File Overlap with Open PRs
+
+Prevent semantic conflicts by detecting file overlap:
+
+```bash
+# Get changed files from open PRs
+OPEN_PRS=$(gh pr list --repo $REPO --json number,files --jq '.[] | {number: .number, files: [.files[].path]}')
+
+# Estimate files this workflow will touch (heuristic: keywords in task)
+TASK_KEYWORDS=$(echo "$TASK" | grep -oE '\w+' | tr '[:upper:]' '[:lower:]')
+
+# For each open PR, check if similar keywords or overlapping area
+# This is a heuristic - exact overlap can't be known until planning complete
+# Flag warning if likely overlap exists
+
+echo "⚠️ File overlap check: reviewing open PRs..."
+# (Implementation details depend on heuristics)
+```
+
+### Step 4: Post Claiming Comment with TTL
+
+Leave a comment with expiry timestamp:
+
+```bash
+CLAIM_EXPIRY=$(date -u -d '+4 hours' +"%Y-%m-%d %H:%M:%S UTC")
+RUN_ID="${ANTFARM_RUN_ID:-$(uuidgen)}"
+
+gh issue comment $ISSUE_NUM --repo $REPO --body "🐜 **Antfarm workflow started**
+
+**Run ID:** \`$RUN_ID\`
+**Workflow:** feature-dev
+**Started:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Claim expires:** $CLAIM_EXPIRY
+
+This workflow will implement the feature and create a PR. Progress updates will be posted here.
+
+---
+*If this workflow fails or times out, the issue will be auto-unassigned after expiry.*"
+```
+
+### Step 5: Create Standardized Branch
+
+Use consistent branch naming:
+
+```bash
+# Extract issue number and create slug
+ISSUE_NUM=123  # From extraction above
+SLUG=$(echo "$TASK" | head -c 50 | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '-' | sed 's/^-//;s/-$//')
+
+BRANCH_NAME="feature/${ISSUE_NUM}-${SLUG}"
+
+# Create and checkout branch
+git checkout -b "$BRANCH_NAME"
+```
+
+### Step 6: Set Up Progress Heartbeat
+
+Schedule periodic progress updates:
+
+```bash
+# Create heartbeat script (will be called periodically by workflow runner)
+cat > /tmp/heartbeat_${RUN_ID}.sh <<'EOF'
+#!/bin/bash
+ISSUE_NUM=$1
+REPO=$2
+RUN_ID=$3
+CURRENT_STORY=$4
+TOTAL_STORIES=$5
+
+gh issue comment $ISSUE_NUM --repo $REPO --body "🔄 **Workflow progress update**
+
+**Run ID:** \`$RUN_ID\`
+**Current:** Story $CURRENT_STORY/$TOTAL_STORIES
+**Last update:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+**Status:** In progress
+
+The workflow is actively working. No action needed."
+EOF
+chmod +x /tmp/heartbeat_${RUN_ID}.sh
+
+# Schedule to run every 10 minutes (implementation depends on workflow runner)
+```
 
 ### Error Handling
 
-If unable to post the comment (no issue/PR found, `gh` not authenticated, etc.):
-- Log a warning but **continue with planning**
-- The claiming comment is for coordination, not a hard requirement
+If claiming fails:
+- **Already assigned:** Abort immediately, log collision prevented
+- **Concurrency limit:** Wait and retry, or queue
+- **gh authentication:** Log error, continue with warning (degraded mode)
+
+If successful, proceed with planning.
 
 ### Output Format
 
 Add to your final output:
 
 ```
-CLAIMED_ISSUE: <issue-number or "none">
-CLAIMED_COMMENT_URL: <url or "none">
+CLAIMED_ISSUE: <issue-number>
+ASSIGNED_TO: <github-username>
+BRANCH_NAME: feature/<issue>-<slug>
+CLAIM_EXPIRY: <iso-timestamp>
+OVERLAP_WARNINGS: <count>
+HEARTBEAT_SCRIPT: /tmp/heartbeat_<run-id>.sh
 ```
 
 ## Story Sizing: The Number One Rule

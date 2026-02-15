@@ -1,0 +1,104 @@
+name: Antfarm Coordination
+
+on:
+  schedule:
+    # Run every 30 minutes
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: 'Target repository (owner/repo)'
+        required: true
+        type: string
+
+permissions:
+  issues: write
+  pull-requests: write
+  contents: read
+
+jobs:
+  monitor-claims:
+    name: Monitor Workflow Claims
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout coordination scripts
+        uses: actions/checkout@v4
+        with:
+          repository: zelki-agent/antfarm-workflows
+          path: antfarm-workflows
+      
+      - name: Setup GitHub CLI
+        run: |
+          gh --version
+      
+      - name: Monitor and unclaim stale workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ANTFARM_CLAIM_TTL_HOURS: 4
+        run: |
+          chmod +x antfarm-workflows/scripts/monitor-claims.sh
+          
+          # If manual trigger, use input repo
+          if [ -n "${{ inputs.repo }}" ]; then
+            antfarm-workflows/scripts/monitor-claims.sh "${{ inputs.repo }}"
+          else
+            # For scheduled runs, monitor all repos with active antfarm workflows
+            # This requires a list of repos to monitor - customize as needed
+            REPOS="${ANTFARM_MONITOR_REPOS:-}"
+            
+            if [ -z "$REPOS" ]; then
+              echo "No repos configured for monitoring. Set ANTFARM_MONITOR_REPOS env var."
+              echo "Example: ANTFARM_MONITOR_REPOS=owner/repo1,owner/repo2"
+              exit 0
+            fi
+            
+            IFS=',' read -ra REPO_ARRAY <<< "$REPOS"
+            for repo in "${REPO_ARRAY[@]}"; do
+              echo "Monitoring $repo..."
+              antfarm-workflows/scripts/monitor-claims.sh "$repo" || echo "Failed to monitor $repo"
+            done
+          fi
+  
+  auto-rebase-prs:
+    name: Auto-Rebase Stale PRs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout coordination scripts
+        uses: actions/checkout@v4
+        with:
+          repository: zelki-agent/antfarm-workflows
+          path: antfarm-workflows
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Setup GitHub CLI
+        run: |
+          gh --version
+      
+      - name: Auto-rebase stale antfarm PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          chmod +x antfarm-workflows/scripts/auto-rebase-prs.sh
+          
+          # If manual trigger, use input repo
+          if [ -n "${{ inputs.repo }}" ]; then
+            antfarm-workflows/scripts/auto-rebase-prs.sh "${{ inputs.repo }}"
+          else
+            # For scheduled runs, process all monitored repos
+            REPOS="${ANTFARM_MONITOR_REPOS:-}"
+            
+            if [ -z "$REPOS" ]; then
+              echo "No repos configured for auto-rebase. Set ANTFARM_MONITOR_REPOS env var."
+              exit 0
+            fi
+            
+            IFS=',' read -ra REPO_ARRAY <<< "$REPOS"
+            for repo in "${REPO_ARRAY[@]}"; do
+              echo "Auto-rebasing PRs in $repo..."
+              antfarm-workflows/scripts/auto-rebase-prs.sh "$repo" || echo "Failed to rebase PRs in $repo"
+            done
+          fi

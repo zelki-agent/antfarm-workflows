@@ -1,0 +1,134 @@
+name: Auto-Rebase PRs
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    # Run every 6 hours
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Git
+        run: |
+          git config --global user.name "Antfarm Auto-Rebase"
+          git config --global user.email "antfarm@users.noreply.github.com"
+
+      - name: Get Open PRs
+        id: get-prs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get all open PRs
+          prs=$(gh pr list --json number,headRefName,labels --jq '.[] | select(.labels[].name == "🟢 workflow-active" or .labels[].name == "antfarm") | {number: .number, branch: .headRefName}')
+          echo "$prs" > /tmp/prs.json
+          echo "Found $(echo "$prs" | jq -s 'length') PRs to check"
+
+      - name: Rebase PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ ! -s /tmp/prs.json ]; then
+            echo "No PRs to rebase"
+            exit 0
+          fi
+          
+          cat /tmp/prs.json | jq -c '.' | while read -r pr; do
+            PR_NUM=$(echo "$pr" | jq -r '.number')
+            BRANCH=$(echo "$pr" | jq -r '.branch')
+            
+            echo "🔄 Checking PR #$PR_NUM (branch: $BRANCH)"
+            
+            # Fetch the branch
+            git fetch origin "$BRANCH:$BRANCH" || {
+              echo "⚠️ Failed to fetch branch $BRANCH"
+              continue
+            }
+            
+            # Check if behind main
+            git checkout "$BRANCH"
+            
+            if git merge-base --is-ancestor HEAD origin/main; then
+              echo "✅ PR #$PR_NUM is up-to-date"
+              git checkout main
+              continue
+            fi
+            
+            echo "📊 PR #$PR_NUM is behind main. Attempting rebase..."
+            
+            # Try rebase
+            if git rebase origin/main; then
+              echo "✅ Rebase successful"
+              
+              # Push (force with lease)
+              if git push --force-with-lease origin "$BRANCH"; then
+                gh pr comment "$PR_NUM" --body "🤖 **Auto-rebased**
+                
+This PR was automatically rebased onto the latest main branch.
+CI will re-run automatically.
+
+$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+                echo "✅ Pushed rebased branch"
+              else
+                echo "❌ Failed to push rebased branch"
+                git rebase --abort
+              fi
+            else
+              echo "⚠️ Rebase conflicts detected"
+              git rebase --abort
+              
+              # Label PR as needing manual rebase
+              gh pr edit "$PR_NUM" --add-label "needs-rebase"
+              
+              gh pr comment "$PR_NUM" --body "⚠️ **Manual rebase required**
+              
+Cannot auto-rebase due to conflicts with main.
+Please rebase manually:
+
+\`\`\`bash
+git checkout $BRANCH
+git pull origin $BRANCH
+git rebase origin/main
+# Resolve conflicts
+git push --force-with-lease origin $BRANCH
+\`\`\`
+
+Label will be automatically removed after successful rebase."
+            fi
+            
+            git checkout main
+          done
+
+      - name: Clean Stale Labels
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Remove 'needs-rebase' label from PRs that are now up-to-date
+          gh pr list --label "needs-rebase" --json number,headRefName | jq -c '.[]' | while read -r pr; do
+            PR_NUM=$(echo "$pr" | jq -r '.number')
+            BRANCH=$(echo "$pr" | jq -r '.headRefName')
+            
+            git fetch origin "$BRANCH:$BRANCH"
+            git checkout "$BRANCH"
+            
+            if git merge-base --is-ancestor HEAD origin/main; then
+              echo "✅ PR #$PR_NUM is now up-to-date. Removing needs-rebase label"
+              gh pr edit "$PR_NUM" --remove-label "needs-rebase"
+            fi
+            
+            git checkout main
+          done
