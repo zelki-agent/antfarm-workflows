@@ -1,0 +1,10 @@
+*.db
+*.log
+progress-*.txt
+node_modules/
+.DS_Store
+.env
+.env.local
+*.swp
+*.swo
+*~
