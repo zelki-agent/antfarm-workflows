@@ -1,0 +1,77 @@
+name: Check Dependency Graph
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  check-graph-changes:
+    name: Ensure dependency-graph.json not modified in PR
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check for dependency-graph.json changes
+        id: check
+        run: |
+          # Get list of changed files in this PR
+          git fetch origin ${{ github.base_ref }}
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+          
+          # Check if dependency-graph.json was modified
+          if echo "$CHANGED_FILES" | grep -q "^dependency-graph\.json$"; then
+            echo "ERROR: dependency-graph.json should not be modified in PRs"
+            echo "graph_modified=true" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ No dependency-graph.json changes detected"
+            echo "graph_modified=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Comment on PR if graph modified
+        if: failure() && steps.check.outputs.graph_modified == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `❌ **Dependency graph should not be modified in PRs**
+            
+            This PR modifies \`dependency-graph.json\`, which is not allowed.
+            
+            **Why this check exists:**
+            - The dependency graph lives **only on the \`main\` branch**
+            - It is updated directly via \`claim-and-start.sh\`, \`complete-story.sh\`, and \`fail-story.sh\`
+            - PRs contain **code changes only**, not graph metadata
+            
+            **How to fix:**
+            1. Remove changes to \`dependency-graph.json\` from this PR
+            2. The graph will be updated automatically on \`main\` after your PR is merged and verified
+            
+            See [DEPENDENCY-GRAPH-ARCHITECTURE.md](../blob/main/DEPENDENCY-GRAPH-ARCHITECTURE.md) for details.`
+            })
+      
+      - name: Add label if graph modified
+        if: failure() && steps.check.outputs.graph_modified == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['needs-attention', 'graph-violation']
+            })
