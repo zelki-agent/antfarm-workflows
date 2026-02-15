@@ -44,24 +44,28 @@ jobs:
         uses: actions/github-script@v7
         with:
           script: |
+            const message = [
+              '❌ **Dependency graph should not be modified in PRs**',
+              '',
+              'This PR modifies `dependency-graph.json`, which is not allowed.',
+              '',
+              '**Why this check exists:**',
+              '- The dependency graph lives **only on the `main` branch**',
+              '- It is updated directly via `claim-and-start.sh`, `complete-story.sh`, and `fail-story.sh`',
+              '- PRs contain **code changes only**, not graph metadata',
+              '',
+              '**How to fix:**',
+              '1. Remove changes to `dependency-graph.json` from this PR',
+              '2. The graph will be updated automatically on `main` after your PR is merged and verified',
+              '',
+              'See [DEPENDENCY-GRAPH-ARCHITECTURE.md](../blob/main/DEPENDENCY-GRAPH-ARCHITECTURE.md) for details.'
+            ].join('\n');
+            
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `❌ **Dependency graph should not be modified in PRs**
-            
-            This PR modifies \`dependency-graph.json\`, which is not allowed.
-            
-            **Why this check exists:**
-            - The dependency graph lives **only on the \`main\` branch**
-            - It is updated directly via \`claim-and-start.sh\`, \`complete-story.sh\`, and \`fail-story.sh\`
-            - PRs contain **code changes only**, not graph metadata
-            
-            **How to fix:**
-            1. Remove changes to \`dependency-graph.json\` from this PR
-            2. The graph will be updated automatically on \`main\` after your PR is merged and verified
-            
-            See [DEPENDENCY-GRAPH-ARCHITECTURE.md](../blob/main/DEPENDENCY-GRAPH-ARCHITECTURE.md) for details.`
+              body: message
             })
       
       - name: Add label if graph modified
